@@ -18,4 +18,4 @@ The token files have a KBase token on the first line and nothing else.
 
 ### TODO
 
-* This script is garbage, it needs a full workover before anyone should ever use if for anything
+* This script is garbage, it needs a full workover before anyone should ever use it for anything
