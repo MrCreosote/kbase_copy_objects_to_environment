@@ -39,12 +39,26 @@ BLOBSTORE = "shock-api"
 ASS_TYPE = "KBaseGenomeAnnotations.Assembly"
 GEN_TYPE = "KBaseGenomes.Genome"
 
+_ONTOLOGY_EVENTS = "ontology_events"
+
+
+def _remove_onto(obj):
+    newonto = []
+    if _ONTOLOGY_EVENTS in obj:
+        for o in obj[_ONTOLOGY_EVENTS]:
+            # https://kbase.slack.com/archives/C4E7KUGTD/p1682388280309109
+            if "ontology_ref" not in o:
+                newonto.append(o)
+        obj[_ONTOLOGY_EVENTS] = newonto
+
 # need to change this to functions that take the field & object and mutate the object
-REMOVE_OBJECT_FIELDS = {
-    ASS_TYPE: ["fasta_handle_info"],  # in assembly but not in assembly type
+ALTER_OBJECT_FIELDS = {
+    ASS_TYPE: [
+        lambda obj: obj.pop("fasta_handle_info", None),
+    ],  # in assembly but not in assembly type
     GEN_TYPE: [
-        "taxon_ref",  # deprecated, don't bother with translating
-        "ontology_events",  # update per https://kbase.slack.com/archives/C4E7KUGTD/p1682388280309109
+        lambda obj: obj.pop("taxon_ref", None),  # deprecated, don't bother with translating
+        _remove_onto,
     ],
 }
 
@@ -209,6 +223,11 @@ def map_type_to_target(clients, source_type):
     return newtype
 
 
+def _update_fields_in_place(obj, type_):
+    for fn in ALTER_OBJECT_FIELDS[type_]:
+        fn(obj)    
+
+
 def main():
     active_type = GEN_TYPE if GENOMES else ASS_TYPE
 
@@ -235,11 +254,11 @@ def main():
         print(f"Processing #{count}/{total}, {upa}, {sourceobj[1]}, {sourceobj[2]}")
         obj = get_object(clients[SOURCE][CLI_WS], upa)
         obj["info"][2] = map_type_to_target(clients, obj["info"][2])
-        for field in REMOVE_OBJECT_FIELDS[active_type]:
-            obj["data"].pop(field, None)
+        _update_fields_in_place(obj["data"], active_type)
         if GENOMES:
             assyupa = obj["data"]["assembly_ref"]
             assy = get_object(clients[SOURCE][CLI_WS], f"{upa};{assyupa}")
+            _update_fields_in_place(assy["data"], ASS_TYPE)
             name = assy["info"][1]
             # could be in multiple workspaces = no unique name guarantee
             name = f"{name}_{assyupa}" if name in assynames else name
