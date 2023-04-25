@@ -30,6 +30,9 @@ TARGET_WS = 68999
 GENOMES = True
 
 # TODO need retries, getting connection aborted errors from hids_to_handles and getting the blobstore node
+# TODO rather than relying on the object name to tell if an object has already been processed,
+#      put a "copy_source": <upa> field in the metadata and key off that. Then name changes don't
+#      affect the copy
 
 WS = "ws"
 HANDLE = "handle_service"
