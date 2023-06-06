@@ -23,26 +23,27 @@ Issues:
 SOURCE_ENV="https://kbase.us/services/"
 TARGET_ENV="https://ci.kbase.us/services/"
 
-SOURCE_WS = 41372
-TARGET_WS = 68999
+SOURCE_WS = 106867 # GROW
+TARGET_WS = 69037
 
 # Copy genomes and their respective assemblies. If False, only copy assemblies.
 GENOMES = True
 
 # TODO need retries, getting connection aborted errors from hids_to_handles and getting the blobstore node
-# TODO rather than relying on the object name to tell if an object has already been processed,
-#      put a "copy_source": <upa> field in the metadata and key off that. Then name changes don't
-#      affect the copy
+
 
 WS = "ws"
 HANDLE = "handle_service"
 BLOBSTORE = "shock-api"
 
-# WARNING - the script is purposely written for this type and won't work for other types
+# WARNING - the script is purposely written for these types and won't work for other types
 ASS_TYPE = "KBaseGenomeAnnotations.Assembly"
 GEN_TYPE = "KBaseGenomes.Genome"
 
 _ONTOLOGY_EVENTS = "ontology_events"
+
+COPY_SOURCE_UPA = "copy_source_upa"
+COPY_SOURCE_URL = "copy_source_url"
 
 
 def _remove_onto(obj):
@@ -159,7 +160,7 @@ def get_object(cli, upa):
     return cli.call("get_objects2", {"objects": [{"ref": upa}]})["data"][0]
 
 
-def save_object(cli, obj):
+def save_object(cli, obj, meta):
     return cli.call(
         "save_objects",
         {
@@ -167,6 +168,7 @@ def save_object(cli, obj):
             "objects": [{
                 "name": obj["info"][1],
                 "type": obj["info"][2],
+                "meta": meta,
                 "data": obj["data"],
                 "provenance": [{
                     "description": f"Copied from {SOURCE_ENV + WS} {to_upa(obj['info'])}"
@@ -231,6 +233,18 @@ def _update_fields_in_place(obj, type_):
         fn(obj)    
 
 
+def _find_copy(clients, source_upa):
+    objs = clients[TARGET][CLI_WS].call(
+        "list_objects",
+        {"ids": [TARGET_WS], "meta": {COPY_SOURCE_UPA: source_upa}, "includeMetadata": 1}
+    )
+    url = SOURCE_ENV + WS
+    for o in objs:
+        if url == o[10][COPY_SOURCE_URL]:
+            return o
+    return None
+
+
 def main():
     active_type = GEN_TYPE if GENOMES else ASS_TYPE
 
@@ -239,19 +253,17 @@ def main():
     clients = get_clients(source_token_file, target_token_file)
 
     target_objs = clients[TARGET][CLI_WS].call(
-        "list_objects", {"ids": [TARGET_WS], "type": active_type})
-    target_completed_names = {o[1] for o in target_objs}
+        "list_objects", {"ids": [TARGET_WS], "type": active_type, "includeMetadata": 1})
+    source_completed_upas = {o[10][COPY_SOURCE_UPA] for o in target_objs}
     source_objs = clients[SOURCE][CLI_WS].call(
         "list_objects", {"ids": [SOURCE_WS], "type": active_type})
-    source_names = {o[1] for o in source_objs}
-    todo_names = source_names - target_completed_names
-    total = len(todo_names)
-    print(f"{total} objects to process out of {len(source_names)} total objects")
-    todo = [o for o in source_objs if o[1] in todo_names]
+    todo_objects = [o for o in source_objs if to_upa(o) not in source_completed_upas]
+    total = len(todo_objects)
+    print(f"{total} objects to process out of {len(source_objs)} total objects")
     allstart = time.time()
     count = 1
     assynames = {}
-    for sourceobj in todo:
+    for sourceobj in todo_objects:
         start = time.time()
         upa = to_upa(sourceobj)
         print(f"Processing #{count}/{total}, {upa}, {sourceobj[1]}, {sourceobj[2]}")
@@ -260,20 +272,17 @@ def main():
         _update_fields_in_place(obj["data"], active_type)
         if GENOMES:
             assyupa = obj["data"]["assembly_ref"]
-            assy = get_object(clients[SOURCE][CLI_WS], f"{upa};{assyupa}")
-            _update_fields_in_place(assy["data"], ASS_TYPE)
-            name = assy["info"][1]
-            # could be in multiple workspaces = no unique name guarantee
-            name = f"{name}_{assyupa}" if name in assynames else name
-            assy["info"][1] = name
-            info = clients[TARGET][CLI_WS].call(  # could call info on the source before get obj
-                "get_object_info3",
-                {"objects": [{"ref": f"{TARGET_WS}/{name}"}], "ignoreErrors": 1}
-            )["infos"][0]
-            if info:
-                assyupa_target = to_upa(info)
-                print(f"\tFound existing assembly {name} {assyupa_target}")
+            copy = _find_copy(clients, assyupa)
+            if copy:
+                assyupa_target = to_upa(copy)
+                print(f"\tFound existing assembly {copy[1]} {assyupa_target}")
             else:
+                assy = get_object(clients[SOURCE][CLI_WS], f"{upa};{assyupa}")
+                _update_fields_in_place(assy["data"], ASS_TYPE)
+                name = assy["info"][1]
+                # could be in multiple workspaces = no unique name guarantee
+                name = f"{name}_{assyupa}" if name in assynames else name
+                assy["info"][1] = name
                 if assy["info"][2].split('-')[0] != ASS_TYPE:
                     raise ValueError(f"Genome {upa} assembly {assyupa} is type {assy['info'][2]}")
                 print(f"\tProcessing assembly {assyupa} {assy['info'][1]} {assy['info'][2]}")
@@ -284,7 +293,11 @@ def main():
                 assy["data"]["fasta_handle_ref"] = hid
                 print(f"\t\tSaving object as type {assy['info'][2]}")
                 assystart = time.time()
-                info = save_object(clients[TARGET][CLI_WS], assy)
+                info = save_object(
+                    clients[TARGET][CLI_WS],
+                    assy,
+                    {COPY_SOURCE_UPA: assyupa, COPY_SOURCE_URL: SOURCE_ENV + WS}
+                )
                 assyupa_target = to_upa(info)
                 print(f"\t\tSaved assembly object {assyupa_target} {info[9]} in "
                         + f"{time.time() - assystart}")
@@ -297,7 +310,10 @@ def main():
                 obj["data"][field] = hid
         print(f"\tSaving object as type {obj['info'][2]}")
         genstart = time.time()
-        objinf = save_object(clients[TARGET][CLI_WS], obj)
+        objinf = save_object(
+            clients[TARGET][CLI_WS],
+            obj,
+            {COPY_SOURCE_UPA: upa, COPY_SOURCE_URL: SOURCE_ENV + WS})
         print(
             f"\tSaved object {to_upa(objinf)} {objinf[2]} {objinf[9]} in {time.time() - genstart}")
         print(f"\tElapsed time: {time.time() - start} Total time: {time.time() - allstart}",
